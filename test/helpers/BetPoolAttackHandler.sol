@@ -124,6 +124,9 @@ contract BetPoolAttackHandler is Test {
         Ghost storage g = ghosts[mSeed % ghosts.length];
         if (g.settled) return;
         uint8 outcome = uint8(bound(outcomeSeed, 0, 2));
+        // Settlement window: decisive from closesAt, any outcome until closesAt + 24 h (exclusive).
+        if (vm.getBlockTimestamp() >= uint256(g.close) + 24 hours) return;
+        if (outcome != 2 && vm.getBlockTimestamp() < g.close) vm.warp(g.close);
         uint256 deadline = vm.getBlockTimestamp() + 300;
         uint256 splitterBefore = MockToken(g.token).balanceOf(SPLITTER);
         pool.settle(g.id, outcome, deadline, _sign(SIGNER_KEY, _outcomeHash(g.id, outcome, deadline)));
@@ -267,6 +270,44 @@ contract BetPoolAttackHandler is Test {
         } catch {
             ++refusedAttacks;
         }
+    }
+
+    /// @dev A correctly signed outcome outside its window: decisive before closesAt, or anything from
+    ///      closesAt + 24 h. It must be refused and leave the market open.
+    function settleOutsideWindow(uint256 mSeed, uint8 outcomeSeed) external {
+        Ghost storage g = ghosts[mSeed % ghosts.length];
+        if (g.settled) return;
+        uint256 now_ = vm.getBlockTimestamp();
+        bool late = now_ >= uint256(g.close) + 24 hours;
+        uint8 outcome = uint8(bound(outcomeSeed, 0, late ? 2 : 1));
+        if (!late && now_ >= g.close) return;
+        uint256 deadline = now_ + 300;
+        try pool.settle(g.id, outcome, deadline, _sign(SIGNER_KEY, _outcomeHash(g.id, outcome, deadline))) {
+            assertTrue(false, "outcome accepted outside the settlement window");
+        } catch {
+            ++refusedAttacks;
+        }
+    }
+
+    /// @dev A freshly signed ticket from closesAt on, while the result can be relayed, must be refused.
+    function betAfterClose(uint256 mSeed, uint256 aSeed, uint256 amountSeed, bool sideB) external {
+        Ghost storage g = ghosts[mSeed % ghosts.length];
+        if (vm.getBlockTimestamp() < g.close && !g.settled) return;
+        address bettor = actors[aSeed % ACTORS];
+        (uint256 min, uint256 max) = pool.limits(g.token);
+        Ticket memory t = _ticket(g.id, bettor, sideB ? 1 : 0, bound(amountSeed, min, max), 10_000);
+        MockToken(g.token).mint(bettor, t.amount);
+        vm.startPrank(bettor);
+        MockToken(g.token).approve(address(pool), t.amount);
+        try pool.bet(t.id, t.side, t.amount, t.weight, t.expiry, t.nonce, t.sig) {
+            assertTrue(false, "bet accepted at or after closesAt or on a settled market");
+        } catch {
+            ++refusedAttacks;
+        }
+        MockToken(g.token).approve(address(pool), 0);
+        MockToken(g.token).transfer(address(0xdead), t.amount);
+        vm.stopPrank();
+        assertFalse(pool.usedNonce(t.nonce), "refused ticket consumed its nonce");
     }
 
     function resettle(uint256 mSeed, uint8 outcomeSeed) external {

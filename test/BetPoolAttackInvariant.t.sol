@@ -12,7 +12,7 @@ contract BetPoolAttackInvariantTest is BetPoolTestBase {
     function setUp() public override {
         super.setUp();
         handler = new BetPoolAttackHandler(pool);
-        bytes4[] memory selectors = new bytes4[](14);
+        bytes4[] memory selectors = new bytes4[](16);
         selectors[0] = handler.create.selector;
         selectors[1] = handler.place.selector;
         selectors[2] = handler.place.selector;
@@ -27,6 +27,8 @@ contract BetPoolAttackInvariantTest is BetPoolTestBase {
         selectors[11] = handler.resettle.selector;
         selectors[12] = handler.strangerClaims.selector;
         selectors[13] = handler.strangerAdmin.selector;
+        selectors[14] = handler.settleOutsideWindow.selector;
+        selectors[15] = handler.betAfterClose.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }

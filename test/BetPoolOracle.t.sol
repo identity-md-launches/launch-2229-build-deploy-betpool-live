@@ -292,6 +292,7 @@ contract BetPoolOracleTest is BetPoolTestBase {
         _create(ID2, IMD);
         _place(ID, alice, 0, 1 ether, 10_000);
         _place(ID, bob, 1, 1 ether, 10_000);
+        vm.warp(_marketState(ID).closesAt);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         bytes memory sigOther = _sign(_outcomeHash(ID2, 0, deadline));
         vm.expectRevert(BetPool.InvalidSignature.selector);
@@ -438,9 +439,9 @@ contract BetPoolOracleTest is BetPoolTestBase {
         _place(ID, bob, 1, 1 ether, 10_000);
         vm.prank(OWNER);
         pool.pause();
+        _settle(ID, 1);
         vm.warp(close + 24 hours);
         pool.expire(ID2);
-        _settle(ID, 1);
         assertEq(_claim(ID, bob), 1.95 ether);
         assertEq(_claim(ID2, bob), 0);
     }
@@ -455,10 +456,6 @@ contract BetPoolOracleTest is BetPoolTestBase {
         vm.assume(key != TEST_SIGNER_KEY);
         _create(ID, IMD);
         uint8 o = uint8(bound(outcome, 0, 2));
-        uint256 deadline = vm.getBlockTimestamp() + 10;
-        bytes memory sig = _signFor(_outcomeHash(ID, o, deadline), address(pool), 1, key);
-        vm.expectRevert(BetPool.InvalidSignature.selector);
-        pool.settle(ID, o, deadline, sig);
         uint64 close = uint64(vm.getBlockTimestamp() + 1 hours);
         bytes memory msig = _signFor(_marketHash(ID2, SHIFT, close, GAME), address(pool), 1, key);
         vm.expectRevert(BetPool.InvalidSignature.selector);
@@ -470,6 +467,13 @@ contract BetPoolOracleTest is BetPoolTestBase {
         vm.prank(alice);
         vm.expectRevert(BetPool.InvalidSignature.selector);
         pool.bet(ID, 0, 1 ether, 5_000, expiry, bytes32(0), tsig);
+        // Settlement is checked inside its window, so only the signature can be what refuses it.
+        vm.warp(_marketState(ID).closesAt);
+        uint256 deadline = vm.getBlockTimestamp() + 10;
+        bytes memory sig = _signFor(_outcomeHash(ID, o, deadline), address(pool), 1, key);
+        vm.expectRevert(BetPool.InvalidSignature.selector);
+        pool.settle(ID, o, deadline, sig);
+        assertFalse(_marketState(ID).settled);
     }
 
     /// forge-config: default.fuzz.runs = 256
