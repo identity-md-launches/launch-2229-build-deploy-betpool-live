@@ -1,0 +1,28 @@
+{
+  "EIP712Domain": [
+    { "name": "name", "type": "string" },
+    { "name": "version", "type": "string" },
+    { "name": "chainId", "type": "uint256" },
+    { "name": "verifyingContract", "type": "address" }
+  ],
+  "Market": [
+    { "name": "marketId", "type": "bytes32" },
+    { "name": "token", "type": "address" },
+    { "name": "closesAt", "type": "uint64" },
+    { "name": "game", "type": "bytes32" }
+  ],
+  "Ticket": [
+    { "name": "marketId", "type": "bytes32" },
+    { "name": "bettor", "type": "address" },
+    { "name": "side", "type": "uint8" },
+    { "name": "amount", "type": "uint256" },
+    { "name": "weightBps", "type": "uint16" },
+    { "name": "expiry", "type": "uint64" },
+    { "name": "nonce", "type": "bytes32" }
+  ],
+  "Outcome": [
+    { "name": "marketId", "type": "bytes32" },
+    { "name": "outcome", "type": "uint8" },
+    { "name": "deadline", "type": "uint256" }
+  ]
+}
