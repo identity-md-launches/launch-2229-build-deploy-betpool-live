@@ -243,14 +243,111 @@ contract BetPoolSafetyTest is BetPoolTestBase {
         pool.settle(ID, 0, deadline, sig);
     }
 
-    function test_settlementAfterRefundDeadlineStillWorksUntilSomeoneExpires() public {
+    function test_settlementRefusedFromRefundDelayOnSoExpiryCannotBeRacedBySettle() public {
         _create(ID, IMD);
         _place(ID, alice, 0, 1 ether, 500);
         _place(ID, bob, 1, 1 ether, 500);
-        vm.warp(uint256(_marketState(ID).closesAt) + 24 hours);
-        _settle(ID, 0);
+        uint256 refundTime = uint256(_marketState(ID).closesAt) + 24 hours;
+        uint256 deadline = refundTime + 1 hours;
+        bytes memory sigA = _sign(_outcomeHash(ID, 0, deadline));
+        bytes memory sigVoid = _sign(_outcomeHash(ID, 2, deadline));
+        // One second before the refund delay the signed result still applies; expire does not.
+        vm.warp(refundTime - 1);
+        vm.expectRevert(BetPool.TooEarlyToExpire.selector);
+        pool.expire(ID);
+        uint256 snapshot = vm.snapshotState();
+        pool.settle(ID, 0, deadline, sigA);
         assertFalse(_marketState(ID).refundable);
         assertEq(_claim(ID, alice), 1.95 ether);
+        vm.revertToState(snapshot);
+        // From the refund delay on, neither a decisive nor a void settlement is accepted, whoever orders first.
+        vm.warp(refundTime);
+        vm.expectRevert(BetPool.SettlementWindowClosed.selector);
+        pool.settle(ID, 0, deadline, sigA);
+        vm.expectRevert(BetPool.SettlementWindowClosed.selector);
+        pool.settle(ID, 2, deadline, sigVoid);
+        assertFalse(_marketState(ID).settled);
+        vm.prank(bob);
+        pool.expire(ID);
+        assertTrue(_marketState(ID).refundable);
+        assertEq(_claim(ID, alice), 1 ether);
+        assertEq(_claim(ID, bob), 1 ether);
+        assertEq(imd.balanceOf(SPLITTER), 0);
+    }
+
+    function test_decisiveSettlementWaitsForCloseButVoidClosesBettingImmediately() public {
+        _create(ID, IMD);
+        _create(ID2, SHIFT);
+        _place(ID, alice, 0, 1 ether, 500);
+        _place(ID, bob, 1, 1 ether, 500);
+        _place(ID2, alice, 0, 1_000 ether, 10_000);
+        uint64 close = _marketState(ID).closesAt;
+        uint256 deadline = uint256(close) + 1 hours;
+        bytes memory sigA = _sign(_outcomeHash(ID, 0, deadline));
+        bytes memory sigB = _sign(_outcomeHash(ID, 1, deadline));
+        vm.expectRevert(BetPool.BettingStillOpen.selector);
+        pool.settle(ID, 0, deadline, sigA);
+        vm.warp(close - 1);
+        vm.expectRevert(BetPool.BettingStillOpen.selector);
+        pool.settle(ID, 1, deadline, sigB);
+        assertFalse(_marketState(ID).settled);
+        // Void needs no close: it refunds and ends betting at once.
+        pool.settle(ID2, 2, deadline, _sign(_outcomeHash(ID2, 2, deadline)));
+        assertTrue(_marketState(ID2).refundable);
+        _fund(SHIFT, bob, 1_000 ether);
+        uint64 expiry = uint64(vm.getBlockTimestamp() + 120);
+        bytes memory ticket = _sign(_ticketHash(ID2, bob, 1, 1_000 ether, 500, expiry, bytes32("late")));
+        vm.prank(bob);
+        vm.expectRevert(BetPool.MarketAlreadySettled.selector);
+        pool.bet(ID2, 1, 1_000 ether, 500, expiry, bytes32("late"), ticket);
+        // At closesAt bets are refused and the decisive outcome is accepted: the two never share a block.
+        vm.warp(close);
+        vm.expectRevert(BetPool.BettingClosed.selector);
+        _signedAttempt(0, 1 ether, 500);
+        vm.prank(carol);
+        pool.settle(ID, 0, deadline, sigA);
+        assertEq(_marketState(ID).outcome, 0);
+        assertEq(imd.balanceOf(SPLITTER), 0.05 ether);
+        assertEq(_claim(ID, alice), 1.95 ether);
+    }
+
+    /// @dev A spectator holds tickets for both sides, learns the result, and submits only the winning
+    ///      one in the block the Outcome is relayed. The Outcome cannot land while betting is open, and
+    ///      once betting is closed the held ticket is refused, so the late bet never earns a bonus.
+    function test_heldTicketCannotBeSubmittedAheadOfTheOutcomeThatDecidesIt() public {
+        _create(ID, IMD);
+        _place(ID, alice, 0, 100 ether, 10_000);
+        _place(ID, bob, 1, 100 ether, 10_000);
+        uint64 expiry = uint64(vm.getBlockTimestamp() + 120);
+        bytes memory ticketA = _sign(_ticketHash(ID, carol, 0, 500 ether, 10_000, expiry, bytes32("heldA")));
+        bytes memory ticketB = _sign(_ticketHash(ID, carol, 1, 500 ether, 10_000, expiry, bytes32("heldB")));
+        _fund(IMD, carol, 500 ether);
+        vm.warp(vm.getBlockTimestamp() + 90);
+        uint256 deadline = vm.getBlockTimestamp() + 2 hours;
+        bytes memory outcomeSig = _sign(_outcomeHash(ID, 0, deadline));
+        // The outcome relay fails while betting is open, whether ordered before or after the held ticket.
+        vm.expectRevert(BetPool.BettingStillOpen.selector);
+        pool.settle(ID, 0, deadline, outcomeSig);
+        vm.prank(carol);
+        pool.bet(ID, 0, 500 ether, 10_000, expiry, bytes32("heldA"), ticketA);
+        vm.expectRevert(BetPool.BettingStillOpen.selector);
+        pool.settle(ID, 0, deadline, outcomeSig);
+        assertEq(pool.claimable(ID, carol), 0);
+        // Once the outcome can be relayed, no ticket (fresh or held) is accepted any more.
+        uint64 close = _marketState(ID).closesAt;
+        vm.warp(close);
+        uint64 lateExpiry = uint64(vm.getBlockTimestamp() + 120);
+        bytes memory lateTicket = _sign(_ticketHash(ID, carol, 1, 500 ether, 10_000, lateExpiry, bytes32("lateB")));
+        vm.prank(carol);
+        vm.expectRevert(BetPool.BettingClosed.selector);
+        pool.bet(ID, 1, 500 ether, 10_000, lateExpiry, bytes32("lateB"), lateTicket);
+        vm.prank(carol);
+        vm.expectRevert(BetPool.BettingClosed.selector);
+        pool.bet(ID, 1, 500 ether, 10_000, expiry, bytes32("heldB"), ticketB);
+        pool.settle(ID, 0, deadline, outcomeSig);
+        // Carol's bet was placed while the result was open, at the same risk as every other bettor.
+        assertEq(pool.claimable(ID, carol), 500 ether + uint256(95 ether) * 500 / 600);
+        assertEq(pool.claimable(ID, alice), 100 ether + uint256(95 ether) * 100 / 600);
     }
 
     function test_invalidOutcomeEvenIfSignedRejected() public {
@@ -407,6 +504,7 @@ contract BetPoolSafetyTest is BetPoolTestBase {
         _place(ID, alice, 0, 1 ether, 500);
         _place(ID, bob, 1, 1 ether, 500);
         imd.setModes(MockToken.Mode.Normal, MockToken.Mode.ReturnFalse);
+        vm.warp(_marketState(ID).closesAt);
         bytes memory sig = _sign(_outcomeHash(ID, 0, vm.getBlockTimestamp()));
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, IMD));
         pool.settle(ID, 0, vm.getBlockTimestamp(), sig);

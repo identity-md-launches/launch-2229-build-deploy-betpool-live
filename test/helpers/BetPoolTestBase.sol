@@ -119,7 +119,11 @@ abstract contract BetPoolTestBase is Test {
         pool.bet(id, side, amount, weight, expiry, nonce, sig);
     }
 
+    /// @dev Decisive outcomes are only accepted once betting has closed, so this moves the clock to closesAt
+    ///      when needed. Void is relayed at the current time. Tests of the timing rules call pool.settle directly.
     function _settle(bytes32 id, uint8 outcome) internal {
+        uint64 close = _marketState(id).closesAt;
+        if (outcome != 2 && vm.getBlockTimestamp() < close) vm.warp(close);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         pool.settle(id, outcome, deadline, _sign(_outcomeHash(id, outcome, deadline)));
     }

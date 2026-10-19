@@ -12,8 +12,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @title BetPool
 /// @notice Signed, weighted pari-mutuel markets for NIGHTSHIFT and Agent Arena.
 /// @dev Amounts and shares are token base units. The two supported tokens have 18 decimals.
-///      The owner must configure the NIGHTSHIFT EOA signer before any signed action can succeed.
-///      No administrator can withdraw funds, change recipients, or bypass signed outcomes.
+///      The signer starts as the NIGHTSHIFT result signer published by GameEscrow; the owner may rotate it.
+///      Decisive outcomes are accepted only once betting has closed, so no ticket can share a block with
+///      the Outcome that decides it. No administrator can withdraw funds, change recipients, or bypass
+///      signed outcomes.
 contract BetPool is EIP712, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -24,6 +26,9 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
     address public constant SHIFT = 0xE5e58E53d0Bb204Aa62c995A6c8CC8a48e60C3AC;
     /// @notice Immutable destination of the fee on the losing side.
     address public constant FEE_SPLITTER = 0x1119d5Df2f046bC2d3c0F6279EF2E9cE49422d44;
+    /// @notice NIGHTSHIFT's result signer at deployment, as published by GameEscrow
+    ///         0xf460fd9ad76f18414f54a2431870e8a116193489 (`signer()`) on Ethereum; the owner may rotate it.
+    address public constant INITIAL_SIGNER = 0x3B5919586FC04F7e99b450a72bcB14Eeb6977497;
     uint256 public constant IMD_HARD_CAP = 10_000 ether;
     uint256 public constant SHIFT_HARD_CAP = 500_000_000 ether;
     uint256 public constant FEE_BPS = 500;
@@ -67,7 +72,7 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
         uint256 max;
     }
 
-    /// @notice Current NIGHTSHIFT EOA signing markets, tickets and outcomes; initially unconfigured.
+    /// @notice Current NIGHTSHIFT EOA signing markets, tickets and outcomes; starts as INITIAL_SIGNER.
     address public signer;
     /// @notice Market metadata, stakes, shares and final status in the order specified by the API.
     mapping(bytes32 marketId => Market) public markets;
@@ -81,7 +86,6 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
     mapping(bytes32 marketId => uint256) public marketBalance;
 
     error OnlyOwner();
-    error SignerNotConfigured();
     error InvalidSigner();
     error InvalidSignature();
     error UnsupportedToken();
@@ -101,6 +105,8 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
     error ZeroShares();
     error InexactTransfer();
     error OutcomeExpired();
+    error BettingStillOpen();
+    error SettlementWindowClosed();
     error TooEarlyToExpire();
     error AlreadyClaimed();
 
@@ -124,9 +130,12 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
         _;
     }
 
-    /// @notice Deploys with fixed addresses and default limits; no external calls or constructor arguments.
-    /// @dev IMD: 0.1–500 tokens. SHIFT: 1,000–25,000,000 tokens. Signer activation is owner-only.
+    /// @notice Deploys with fixed addresses, the published NIGHTSHIFT signer and default limits;
+    ///         no external calls or constructor arguments.
+    /// @dev IMD: 0.1–500 tokens. SHIFT: 1,000–25,000,000 tokens. The owner confirms or rotates the signer.
     constructor() EIP712("NightshiftBets", "1") {
+        signer = INITIAL_SIGNER;
+        emit SignerSet(INITIAL_SIGNER);
         _setLimits(IMD, 0.1 ether, 500 ether);
         _setLimits(SHIFT, 1_000 ether, 25_000_000 ether);
     }
@@ -225,14 +234,20 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
         if (token.balanceOf(address(this)) != beforeBalance + amount) revert InexactTransfer();
     }
 
-    /// @notice Finalizes immediately using a signed Outcome; anyone may relay, even before closesAt or while paused.
-    /// @dev Void or either empty side refunds every stake. Otherwise only the losing side pays a 5% fee.
+    /// @notice Finalizes a market using a signed Outcome; anyone may relay, even while paused.
+    /// @dev A decisive outcome (A or B) is accepted only at or after closesAt, so every accepted bet
+    ///      precedes the Outcome by at least one block and a ticket held until the result is known
+    ///      cannot be paid from the losers. Void may be relayed at any time and closes betting.
+    ///      No settlement is accepted from closesAt + 24 hours on; expire is the only finalization then.
+    ///      Void or either empty side refunds every stake. Otherwise only the losing side pays a 5% fee.
     /// @param outcome 0 for A, 1 for B, 2 for void.
     /// @param deadline Inclusive signature deadline; the signer determines its lifetime.
     function settle(bytes32 marketId, uint8 outcome, uint256 deadline, bytes calldata sig) external nonReentrant {
         Market storage market = _market(marketId);
         if (market.settled) revert MarketAlreadySettled();
         if (outcome > 2) revert InvalidOutcome();
+        if (outcome != 2 && block.timestamp < market.closesAt) revert BettingStillOpen();
+        if (block.timestamp >= uint256(market.closesAt) + REFUND_DELAY) revert SettlementWindowClosed();
         if (deadline < block.timestamp) revert OutcomeExpired();
         _verify(keccak256(abi.encode(OUTCOME_TYPEHASH, marketId, outcome, deadline)), sig);
 
@@ -251,7 +266,7 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
     }
 
     /// @notice Makes an unsettled market refundable at or after closesAt + 24 hours, without a signature or fee.
-    /// @dev Expiry records outcome 2 (void); a later signed settlement cannot replace it.
+    /// @dev Expiry records outcome 2 (void). From that moment settle is refused, so the two paths never race.
     function expire(bytes32 marketId) external nonReentrant {
         Market storage market = _market(marketId);
         if (market.settled) revert MarketAlreadySettled();
@@ -332,10 +347,9 @@ contract BetPool is EIP712, Pausable, ReentrancyGuard {
     }
 
     function _verify(bytes32 structHash, bytes calldata sig) private view {
-        address configuredSigner = signer;
-        if (configuredSigner == address(0)) revert SignerNotConfigured();
+        // signer is never zero: the constructor sets INITIAL_SIGNER and setSigner rejects zero.
         (address recovered, ECDSA.RecoverError error,) = ECDSA.tryRecover(_hashTypedDataV4(structHash), sig);
-        if (error != ECDSA.RecoverError.NoError || recovered != configuredSigner) revert InvalidSignature();
+        if (error != ECDSA.RecoverError.NoError || recovered != signer) revert InvalidSignature();
     }
 
     function _setLimits(address token, uint256 min, uint256 max) private {

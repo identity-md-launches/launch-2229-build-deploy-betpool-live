@@ -33,21 +33,23 @@ Tests use local mocks at the specified token addresses, test-only signing keys, 
 | Signed weight | 500–10,000 bps, inclusive |
 | Market creation horizon | Strictly future through 7 days ahead |
 | Ticket expiry horizon | Current timestamp through 120 seconds ahead |
-| Unsettled-market refund delay | 24 hours after `closesAt` |
+| Decisive settlement window | From `closesAt` (inclusive) to `closesAt + 24 hours` (exclusive) |
+| Void settlement window | Creation to `closesAt + 24 hours` (exclusive) |
+| Unsettled-market refund delay | 24 hours after `closesAt`; from then on `expire` is the only finalization |
+| Initial signer | `0x3B5919586FC04F7e99b450a72bcB14Eeb6977497`, GameEscrow's `signer()` on Ethereum when this was written |
 | Domain | `NightshiftBets`, version `1`, current chain ID, deployed contract address |
 
 Both tokens are treated as plain, non-rebasing ERC-20s with 18 decimals and no transfer fees, as specified. All on-chain amounts and limit arguments are **base units**, not whole tokens. For example, 1,000 SHIFT is `1000000000000000000000` units. Supported token addresses, fee recipient, fee, caps, and owner are constants. Factories and deployers acquire no authority.
 
 ## After launch
 
-The actual NIGHTSHIFT result-signing address is not supplied in the brief. It is intentionally **unconfigured** at construction. There is no guessed signer and no constructor dependency on GameEscrow.
+The brief names NIGHTSHIFT's result signer by reference to its GameEscrow at `0xf460fd9ad76f18414f54a2431870e8a116193489`. That contract's public `signer()` returned the EOA `0x3B5919586FC04F7e99b450a72bcB14Eeb6977497` on Ethereum mainnet on 2026-10-19 (its `owner()` is the same owner this brief names), so the constructor stores it as `INITIAL_SIGNER` and emits `SignerSet`. The constructor makes no external call: the value is a constant, not a live read, and the contract is usable from the first block.
 
-1. The named owner obtains the actual backend EOA result signer from the NIGHTSHIFT operator, confirming it against the operator's GameEscrow deployment at `0xf460fd9ad76f18414f54a2431870e8a116193489` on the launch chain. Do not use the escrow contract's own address as the signing key address.
-2. The owner calls **`setSigner(actualSigner)`** and confirms `SignerSet` and `signer()`. Zero is rejected. Before this configuration, signed actions fail with `SignerNotConfigured`; the unset value is a disabled state, never an authorized identity. This is the only required operational setting, using the setter explicitly permitted by the brief.
-3. The operator configures the signing backend and spectator application with the confirmed BetPool deployment address and chain ID. Publish the confirmed address and verified source through the launch handoff.
-4. The owner may call `setLimits(token,min,max)` if different per-bet bounds are desired. Defaults are already initialized in the constructor, and no setting can exceed the fixed caps.
+1. Before the service opens, the owner compares `signer()` with GameEscrow's current `signer()`. If NIGHTSHIFT has rotated its key since this was written, the owner calls **`setSigner(currentSigner)`** and confirms `SignerSet`. Zero is rejected. Do not use the escrow contract's own address as the signing key address.
+2. The operator configures the signing backend and spectator application with the confirmed BetPool deployment address and chain ID. Publish the confirmed address and verified source through the launch handoff.
+3. The owner may call `setLimits(token,min,max)` if different per-bet bounds are desired. Defaults are already initialized in the constructor, and no setting can exceed the fixed caps.
 
-No initialization transaction by the deployment factory is required. Signer activation is a subsequent owner operation before the service opens. The manifest step owns `launch.json`; this project intentionally does not supply that file.
+No initialization transaction by the deployment factory is required. The manifest step owns `launch.json`; this project intentionally does not supply that file.
 
 ## Lifecycle and payouts
 
@@ -57,7 +59,11 @@ Spectators first approve the market's token, then call `bet(...)` themselves. Th
 
 Each ticket adds `floor(amount * weightBps / 10000)` shares to that wallet and side. Repeated bets add their individually rounded shares; weights are not averaged. A wallet can bet on both sides. The signed weight is chosen by NIGHTSHIFT, not calculated from game state by the contract.
 
-Anyone can relay `settle(marketId,outcome,deadline,sig)`. Outcomes are A = 0, B = 1, void = 2. The deadline is inclusive and has no maximum lifetime. A signed settlement can occur before the scheduled close and immediately ends betting. No result can be replaced after settlement or expiry.
+Anyone can relay `settle(marketId,outcome,deadline,sig)`. Outcomes are A = 0, B = 1, void = 2. The deadline is inclusive and has no maximum lifetime. No result can be replaced after settlement or expiry.
+
+A **decisive** outcome (A or B) is accepted only at or after `closesAt` (`BettingStillOpen` before that). Bets are accepted only strictly before `closesAt`, so no accepted bet can share a block with, or be ordered ahead of, the Outcome that decides it. This is what makes the weighted pari-mutuel fair: a ticket issued while the result was open stays valid for up to 120 seconds, and without this rule a spectator holding tickets for both sides could submit only the winning one in the block the Outcome is relayed and take a risk-free share of the losing pool. `closesAt` is therefore NIGHTSHIFT's betting cutoff, chosen at market creation before the result is known; if a match ends early, its result is relayed once `closesAt` is reached. A **void** outcome may be relayed at any time while the market is unsettled and immediately ends betting (a bet ordered ahead of it is simply refunded).
+
+No settlement of any kind is accepted from `closesAt + 24 hours` on (`SettlementWindowClosed`). From that moment `expire` is the only way to finalize, so a late signed result and a permissionless expiry can never race for the same market: NIGHTSHIFT must relay every outcome within 24 hours of `closesAt`.
 
 For a normal two-sided market, let `L` be total losing stakes and `S` the winning side's total shares:
 
@@ -69,7 +75,7 @@ walletPayout = walletWinningStake + floor(bonusPool * walletWinningShares / S)
 
 The fee is transferred at settlement to the fixed splitter. The bonus rounds down once per winning wallet, using full-precision multiplication/division. Total rounding dust is less than one token wei per winning wallet, or less than the number of winning wallets in aggregate. Claims consume a separate per-market ledger, so other markets' funds cannot cover a claim. Direct token donations do not increase shares or payouts. Dust and accidental donations remain locked permanently; there is no sweep function.
 
-Void markets and markets with either side empty refund every wallet's exact combined stakes, with zero fee. At or after `closesAt + 24 hours`, anyone can `expire` an unsettled market and produce the same refunds. Expiry records outcome 2 and emits `Expired`. A valid signed settlement remains possible after that time until someone expires the market; the first successful finalization wins.
+Void markets and markets with either side empty refund every wallet's exact combined stakes, with zero fee. At or after `closesAt + 24 hours`, anyone can `expire` an unsettled market and produce the same refunds. Expiry records outcome 2 and emits `Expired`. Settlement is refused from that time, so the refund is the only possible finalization of a market whose result was not relayed in time.
 
 `claim` pays only the caller and marks the wallet claimed once. Losing-only wallets and nonparticipants receive zero; their zero-value claim succeeds and emits `Claimed(...,0)`. `claimable` is zero before settlement, after a claim, for unknown markets, or for a losing-only wallet. `claimMany` is an atomic list of claims, can mix tokens, and accepts an empty list. An unknown, unsettled, already-claimed, or duplicate market reverts the whole batch. Split long lists to fit the block gas limit.
 
@@ -95,9 +101,9 @@ The ABI exposes the required `markets`, `betsOf`, `claimable`, `limits`, `usedNo
 
 ## Operational responsibilities and trust
 
-The NIGHTSHIFT operator authenticates bettors, evaluates match state and underdog/early weights, issues short-lived tickets and unique IDs/nonces, stops ticket issuance when results are known, and signs exactly one correct outcome per market. The on-chain contract verifies authorization; it does not verify gameplay or the accuracy of a result. Avoid long-lived outcome authorizations and never issue conflicting outcomes. A valid ticket expiring within 120 seconds at inclusion does not itself prove when it was originally issued.
+The NIGHTSHIFT operator authenticates bettors, evaluates match state and underdog/early weights, issues short-lived tickets and unique IDs/nonces, picks each market's `closesAt` as a betting cutoff that precedes the result, relays each decisive outcome between `closesAt` and `closesAt + 24 hours`, and signs exactly one correct outcome per market. The on-chain contract verifies authorization; it does not verify gameplay or the accuracy of a result. Avoid long-lived outcome authorizations and never issue conflicting outcomes. A valid ticket expiring within 120 seconds at inclusion does not itself prove when it was originally issued, which is why the contract, not ticket discipline, keeps bets and decisive outcomes in different blocks.
 
-The permanent owner can rotate the signer, adjust bounded limits, and pause/unpause new markets and bets. The signer can determine every market's result and economic weights, and the owner can appoint that signer; these are material trust assumptions. Rotating the signer immediately invalidates unused signatures from prior keys, including pending outcomes for existing markets. The new signer must reissue needed authorizations. Reappointing an old key can make its still-valid, unused signatures valid again; consumed nonces remain used.
+The permanent owner can rotate the signer, adjust bounded limits, and pause/unpause new markets and bets. The signer can determine every market's result and economic weights, and the owner can appoint that signer at any time with immediate effect, for open and funded markets too; the brief grants this power, and it means the owner key and the signer key must be held by the same trusted party. Rotating the signer immediately invalidates unused signatures from prior keys, including pending outcomes for existing markets. The new signer must reissue needed authorizations. Reappointing an old key can make its still-valid, unused signatures valid again; consumed nonces remain used.
 
 Pausing never stops settlement, expiry or claims and never extends any deadline. If the signer disappears, expiry provides a permissionless refund path. If fee transfer fails, settlement reverts completely and expiry remains possible. If a payout transfer fails, the claim remains unconsumed. Token-level transfer restrictions can still prevent payments until the token permits them; BetPool cannot override token behavior.
 

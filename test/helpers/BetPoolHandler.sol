@@ -147,6 +147,9 @@ contract BetPoolHandler is Test {
         Model storage m = models[marketSeed % models.length];
         if (m.settled) return;
         uint8 outcome = uint8(bound(outcomeSeed, 0, 2));
+        // Settlement is refused from close + 24 hours; a decisive outcome additionally needs betting closed.
+        if (vm.getBlockTimestamp() >= uint256(m.close) + 24 hours) return;
+        if (outcome != 2 && vm.getBlockTimestamp() < m.close) vm.warp(m.close);
         uint256 deadline = vm.getBlockTimestamp() + 120;
         bytes32 hash = keccak256(
             abi.encode(keccak256("Outcome(bytes32 marketId,uint8 outcome,uint256 deadline)"), m.id, outcome, deadline)

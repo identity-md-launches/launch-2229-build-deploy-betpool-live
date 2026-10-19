@@ -20,6 +20,7 @@ contract BetPoolEventsTest is BetPoolTestBase {
         vm.prank(alice);
         pool.bet(ID, 0, 1 ether, 5_000, expiry, nonce, sig);
         _place(ID, bob, 1, 2 ether + 19, 500);
+        vm.warp(close);
         sig = _sign(_outcomeHash(ID, 0, vm.getBlockTimestamp()));
         vm.expectEmit(true, true, true, true, address(pool));
         emit BetPool.Settled(ID, 0, 0.1 ether);
@@ -59,6 +60,7 @@ contract BetPoolEventsTest is BetPoolTestBase {
     function test_refundableSettlementEmitsZeroFee() public {
         _create(ID, IMD);
         _place(ID, alice, 0, 1 ether, 500);
+        vm.warp(_marketState(ID).closesAt);
         bytes memory sig = _sign(_outcomeHash(ID, 1, vm.getBlockTimestamp()));
         vm.expectEmit(true, true, true, true, address(pool));
         emit BetPool.Settled(ID, 1, 0);

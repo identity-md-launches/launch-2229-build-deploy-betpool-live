@@ -4,11 +4,15 @@ pragma solidity 0.8.26;
 import {BetPoolTestBase, BetPool, MockToken} from "./helpers/BetPoolTestBase.sol";
 
 contract BetPoolFlowsTest is BetPoolTestBase {
-    function test_constructorDefaultsAndUnconfiguredSigner() public {
+    function test_constructorDefaultsIncludePublishedNightshiftSigner() public {
+        address published = 0x3B5919586FC04F7e99b450a72bcB14Eeb6977497;
+        vm.expectEmit(true, true, true, true);
+        emit BetPool.SignerSet(published);
         BetPool fresh = new BetPool();
         assertEq(fresh.owner(), OWNER);
         assertTrue(fresh.owner() != address(this));
-        assertEq(fresh.signer(), address(0));
+        assertEq(fresh.INITIAL_SIGNER(), published);
+        assertEq(fresh.signer(), published);
         assertFalse(fresh.paused());
         assertEq(fresh.IMD(), IMD);
         assertEq(fresh.SHIFT(), SHIFT);
@@ -21,9 +25,17 @@ contract BetPoolFlowsTest is BetPoolTestBase {
         assertEq(max, 25_000_000 ether);
         assertEq(fresh.IMD_HARD_CAP(), 10_000 ether);
         assertEq(fresh.SHIFT_HARD_CAP(), 500_000_000 ether);
+        // Only the published signer is trusted out of the box: the test key is refused until the owner rotates.
         uint64 close = uint64(vm.getBlockTimestamp() + 1 hours);
-        vm.expectRevert(BetPool.SignerNotConfigured.selector);
+        bytes memory sig = _signFor(_marketHash(ID, IMD, close, GAME), address(fresh), 1, TEST_SIGNER_KEY);
+        vm.expectRevert(BetPool.InvalidSignature.selector);
+        fresh.createMarket(ID, IMD, close, GAME, sig);
+        vm.expectRevert(BetPool.InvalidSignature.selector);
         fresh.createMarket(ID, IMD, close, GAME, "");
+        vm.prank(OWNER);
+        fresh.setSigner(vm.addr(TEST_SIGNER_KEY));
+        fresh.createMarket(ID, IMD, close, GAME, sig);
+        assertEq(fresh.signer(), vm.addr(TEST_SIGNER_KEY));
     }
 
     function test_fullWeightedFlowIMD_AWins() public {

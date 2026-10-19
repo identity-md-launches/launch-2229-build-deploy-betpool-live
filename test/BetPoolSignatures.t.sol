@@ -261,6 +261,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
     function testFuzz_outcomeSignatureBindsEveryField(uint8 field) public {
         field = uint8(bound(field, 0, 2));
         _create(ID2, IMD);
+        vm.warp(_marketState(ID).closesAt);
         bytes32 id = ID;
         uint8 outcome;
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
@@ -274,6 +275,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
 
     function testFuzz_settleRejectsWrongSignerContractChain(uint8 variant) public {
         variant = uint8(bound(variant, 0, 2));
+        vm.warp(_marketState(ID).closesAt);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         bytes memory sig = _signFor(
             _outcomeHash(ID, 0, deadline),
@@ -286,6 +288,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
     }
 
     function test_settlementDeadlineInclusiveAndPermissionless() public {
+        vm.warp(_marketState(ID).closesAt);
         uint256 deadline = vm.getBlockTimestamp();
         bytes memory sig = _sign(_outcomeHash(ID, 0, deadline));
         vm.prank(dave);
@@ -294,6 +297,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
     }
 
     function test_expiredSettlementRejected() public {
+        vm.warp(_marketState(ID).closesAt);
         uint256 deadline = vm.getBlockTimestamp() - 1;
         bytes memory sig = _sign(_outcomeHash(ID, 0, deadline));
         vm.expectRevert(BetPool.OutcomeExpired.selector);
@@ -301,6 +305,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
     }
 
     function test_ownerCannotSettleWithoutSigner() public {
+        vm.warp(_marketState(ID).closesAt);
         uint256 deadline = vm.getBlockTimestamp() + 1 hours;
         vm.prank(OWNER);
         vm.expectRevert(BetPool.InvalidSignature.selector);
@@ -311,7 +316,7 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
     function test_rotationRevokesAllOldSignatureTypesAndNewSignerWorks() public {
         Ticket memory t = _ticket();
         uint64 close = uint64(vm.getBlockTimestamp() + 1 hours);
-        uint256 deadline = vm.getBlockTimestamp() + 1 hours;
+        uint256 deadline = vm.getBlockTimestamp() + 2 hours;
         bytes memory ticketSig = _sign(_hash(t));
         bytes memory marketSig = _sign(_marketHash(ID2, IMD, close, GAME));
         bytes memory outcomeSig = _sign(_outcomeHash(ID, 0, deadline));
@@ -321,12 +326,13 @@ contract BetPoolSignaturesTest is BetPoolTestBase {
         _submit(t, ticketSig);
         vm.expectRevert(BetPool.InvalidSignature.selector);
         pool.createMarket(ID2, IMD, close, GAME, marketSig);
-        vm.expectRevert(BetPool.InvalidSignature.selector);
-        pool.settle(ID, 0, deadline, outcomeSig);
         _submit(t, _signFor(_hash(t), address(pool), 1, OTHER_TEST_KEY));
         pool.createMarket(
             ID2, IMD, close, GAME, _signFor(_marketHash(ID2, IMD, close, GAME), address(pool), 1, OTHER_TEST_KEY)
         );
+        vm.warp(_marketState(ID).closesAt);
+        vm.expectRevert(BetPool.InvalidSignature.selector);
+        pool.settle(ID, 0, deadline, outcomeSig);
         pool.settle(ID, 0, deadline, _signFor(_outcomeHash(ID, 0, deadline), address(pool), 1, OTHER_TEST_KEY));
         assertEq(pool.claimable(ID, alice), 1 ether);
     }
